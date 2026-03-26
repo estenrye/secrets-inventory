@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -23,6 +24,21 @@ import (
 type scanArgs struct {
 	configPath string
 	outDir     string
+}
+
+func githubWebBase(apiBase string) string {
+	if apiBase == "" {
+		return "https://github.com"
+	}
+	// Typical GHES API base: https://github.example.com/api/v3/
+	// Web base:             https://github.example.com/
+	s := strings.TrimSpace(apiBase)
+	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, "/api/v3")
+	if s == "" {
+		return "https://github.com"
+	}
+	return s
 }
 
 func main() {
@@ -119,10 +135,11 @@ func runScan(args scanArgs, stdout, stderr io.Writer) error {
 	}
 
 	snapshot := model.Snapshot{
-		GeneratedAt: time.Now().UTC(),
-		Targets:     cfg.Targets,
-		Repos:       make([]model.Repo, 0, len(repos)),
-		Findings:    []model.Finding{},
+		GeneratedAt:   time.Now().UTC(),
+		GitHubWebBase: githubWebBase(cfg.GitHub.BaseURL),
+		Targets:       cfg.Targets,
+		Repos:         make([]model.Repo, 0, len(repos)),
+		Findings:      []model.Finding{},
 	}
 
 	scanner := analyze.NewScanner(analyze.ScannerOptions{
@@ -132,10 +149,15 @@ func runScan(args scanArgs, stdout, stderr io.Writer) error {
 	})
 
 	for _, r := range repos {
+		sha, shaErr := gh.DefaultBranchSHA(ctx, r)
+		if shaErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s/%s: unable to resolve default branch SHA: %v\n", r.GetOwner().GetLogin(), r.GetName(), shaErr)
+		}
 		snapshot.Repos = append(snapshot.Repos, model.Repo{
 			Owner:         r.GetOwner().GetLogin(),
 			Name:          r.GetName(),
 			DefaultBranch: r.GetDefaultBranch(),
+			ScannedRef:    sha,
 			Archived:      r.GetArchived(),
 			Private:       r.GetPrivate(),
 		})

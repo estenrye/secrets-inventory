@@ -125,6 +125,27 @@ func (c *Client) ResolveTargets(ctx context.Context, t config.Targets) ([]*githu
 	return out, nil
 }
 
+func (c *Client) DefaultBranchSHA(ctx context.Context, repo *github.Repository) (string, error) {
+	owner := repo.GetOwner().GetLogin()
+	name := repo.GetName()
+	branch := repo.GetDefaultBranch()
+	if owner == "" || name == "" || branch == "" {
+		return "", fmt.Errorf("missing owner/name/default_branch for repo")
+	}
+	b, _, err := c.gh.Repositories.GetBranch(ctx, owner, name, branch, 0)
+	if err != nil {
+		return "", err
+	}
+	if b == nil || b.Commit == nil {
+		return "", fmt.Errorf("no commit info for %s/%s branch %s", owner, name, branch)
+	}
+	sha := b.Commit.GetSHA()
+	if sha == "" {
+		return "", fmt.Errorf("empty sha for %s/%s branch %s", owner, name, branch)
+	}
+	return sha, nil
+}
+
 func (c *Client) ListWorkflowFiles(ctx context.Context, repo *github.Repository) ([]string, error) {
 	owner := repo.GetOwner().GetLogin()
 	name := repo.GetName()

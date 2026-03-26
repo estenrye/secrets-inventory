@@ -1,6 +1,7 @@
 package report
 
 import (
+	"fmt"
 	"html/template"
 	"os"
 	"sort"
@@ -25,6 +26,45 @@ type refCount struct {
 }
 
 func WriteHTML(path string, snap model.Snapshot) error {
+	repoRef := map[string]string{}
+	for _, r := range snap.Repos {
+		key := r.Owner + "/" + r.Name
+		ref := strings.TrimSpace(r.ScannedRef)
+		if ref == "" {
+			ref = strings.TrimSpace(r.DefaultBranch)
+		}
+		repoRef[key] = ref
+	}
+
+	sourceURL := func(f model.Finding) string {
+		filePath := ""
+		switch f.FileKind {
+		case "workflow_yaml":
+			filePath = strings.TrimSpace(f.WorkflowPath)
+		default:
+			filePath = strings.TrimSpace(f.FilePath)
+		}
+		if filePath == "" {
+			return ""
+		}
+		if strings.Contains(filePath, "__THIS_REPO__") || strings.Contains(filePath, "__BUILDER_CHECKOUT_DIR__") {
+			return ""
+		}
+		ref := repoRef[f.RepoOwner+"/"+f.RepoName]
+		if ref == "" {
+			return ""
+		}
+		base := strings.TrimRight(strings.TrimSpace(snap.GitHubWebBase), "/")
+		if base == "" {
+			base = "https://github.com"
+		}
+		url := fmt.Sprintf("%s/%s/%s/blob/%s/%s", base, f.RepoOwner, f.RepoName, ref, filePath)
+		if f.LineStart > 0 {
+			url = fmt.Sprintf("%s#L%d", url, f.LineStart)
+		}
+		return url
+	}
+
 	secretFindings := make([]model.Finding, 0)
 	envFindings := make([]model.Finding, 0)
 	varFindings := make([]model.Finding, 0)
@@ -76,7 +116,9 @@ func WriteHTML(path string, snap model.Snapshot) error {
 		TopRefs:      top,
 	}
 
-	tmpl := template.Must(template.New("r").Parse(htmlTemplate))
+	tmpl := template.Must(template.New("r").Funcs(template.FuncMap{
+		"sourceURL": sourceURL,
+	}).Parse(htmlTemplate))
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -189,7 +231,7 @@ const htmlTemplate = `<!doctype html>
   <table>
     <thead>
       <tr>
-        <th>Repo</th><th>Workflow</th><th>Job</th><th>Step</th><th>File</th><th>Ref</th><th>Context</th>
+        <th>Repo</th><th>Workflow</th><th>Job</th><th>Step</th><th>File</th><th>Ref</th><th>Context</th><th>Source</th>
       </tr>
     </thead>
     <tbody>
@@ -202,6 +244,7 @@ const htmlTemplate = `<!doctype html>
         <td><code>{{ .FileKind }}{{ if .FilePath }}:{{ .FilePath }}{{ end }}</code></td>
         <td><code>{{ .RefType }}.{{ .RefName }}</code></td>
         <td><code>{{ .ContextKind }}</code></td>
+        <td>{{ $u := sourceURL . }}{{ if $u }}<a href="{{ $u }}" target="_blank" rel="noreferrer">view</a>{{ else }}n/a{{ end }}</td>
       </tr>
       {{ end }}
     </tbody>
