@@ -38,18 +38,34 @@ var (
 
 func (s *Scanner) ScanWorkflowYAML(owner, repo, workflowPath, yamlText string) ([]model.Finding, []model.FileRef, error) {
 	known := map[string]model.OriginHint{}
+	seen := map[string]struct{}{}
 
 	findings := []model.Finding{}
 	addFiles := []model.FileRef{}
+
+	appendUnique := func(fs ...model.Finding) {
+		for _, f := range fs {
+			k := findingKey(f)
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
+			findings = append(findings, f)
+		}
+	}
 
 	// Parse YAML if possible for context; fall back to raw scan.
 	var root yaml.Node
 	err := yaml.Unmarshal([]byte(yamlText), &root)
 	if err != nil {
 		// raw scan only
-		findings = append(findings, scanStringForRefs(owner, repo, workflowPath, "workflow_yaml", "", 0, "", "", "", "", yamlText, known)...)
+		appendUnique(scanStringForRefs(owner, repo, workflowPath, "workflow_yaml", "", 0, "", "", "raw_scan", "", yamlText, known)...)
 		return findings, addFiles, err
 	}
+
+	// Always do a raw-text pass across the full YAML, even when parsing succeeds.
+	// This catches references in keys/sections that the AST-walk doesn't currently traverse.
+	appendUnique(scanStringForRefs(owner, repo, workflowPath, "workflow_yaml", "", 0, "", "", "raw_scan", "", yamlText, known)...)
 
 	// Walk the YAML for env declarations and for common string fields.
 	walkWorkflow(&root, func(fieldPath, jobID string, stepIndex int, stepName, contextKind, actionUses string, val string) {
@@ -61,7 +77,7 @@ func (s *Scanner) ScanWorkflowYAML(owner, repo, workflowPath, yamlText string) (
 			}
 			return
 		}
-		findings = append(findings, scanStringForRefs(owner, repo, workflowPath, "workflow_yaml", jobID, stepIndex, stepName, fieldPath, contextKind, actionUses, val, known)...)
+		appendUnique(scanStringForRefs(owner, repo, workflowPath, "workflow_yaml", jobID, stepIndex, stepName, fieldPath, contextKind, actionUses, val, known)...)
 
 		// Discover script entrypoints in run blocks.
 		if contextKind == "run_script" {
@@ -129,6 +145,25 @@ func (s *Scanner) ScanWorkflowYAML(owner, repo, workflowPath, yamlText string) (
 	})
 
 	return findings, addFiles, nil
+}
+
+func findingKey(f model.Finding) string {
+	// Must be stable across runs and include enough fields to avoid accidental collisions.
+	return strings.Join([]string{
+		f.RepoOwner,
+		f.RepoName,
+		f.WorkflowPath,
+		f.JobID,
+		fmt.Sprintf("%d", f.StepIndex),
+		f.StepName,
+		f.FieldPath,
+		f.FileKind,
+		f.FilePath,
+		f.RefType,
+		f.RefName,
+		f.ContextKind,
+		f.ActionUses,
+	}, "|")
 }
 
 func (s *Scanner) ScanRepoFile(ref model.FileRef, content string) ([]model.Finding, []model.FileRef, error) {
@@ -329,6 +364,21 @@ func walkWorkflow(root *yaml.Node, fn func(fieldPath, jobID string, stepIndex in
 	}
 	if doc.Kind != yaml.MappingNode {
 		return
+	}
+
+	// workflow env
+	if envNode := mappingGet(doc, "env"); envNode != nil {
+		if envNode.Kind == yaml.MappingNode {
+			for i := 0; i < len(envNode.Content); i += 2 {
+				k := envNode.Content[i]
+				if k != nil && k.Kind == yaml.ScalarNode && k.Value != "" {
+					fn("env."+k.Value, "", 0, "", "env_block", "", "env_key:"+k.Value)
+				}
+			}
+		}
+		yamlWalkStrings(envNode, "env", func(p, v string) {
+			fn(p, "", 0, "", "env_block", "", v)
+		})
 	}
 
 	jobs := mappingGet(doc, "jobs")

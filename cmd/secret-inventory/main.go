@@ -108,9 +108,10 @@ func runScan(args scanArgs, stdout, stderr io.Writer) error {
 
 	etagPath := filepath.Join(cacheDir, "etags.json")
 	etagStore, _ := githubclient.LoadETagStore(etagPath)
+	fileCacheDir := filepath.Join(cacheDir, "files")
 
 	ctx := context.Background()
-	gh := githubclient.New(token, cfg.GitHub.BaseURL, etagStore)
+	gh := githubclient.New(token, cfg.GitHub.BaseURL, etagStore, fileCacheDir)
 
 	repos, err := gh.ResolveTargets(ctx, cfg.Targets)
 	if err != nil {

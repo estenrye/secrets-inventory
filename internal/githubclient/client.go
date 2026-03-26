@@ -19,6 +19,7 @@ var ErrNotModified = errors.New("not modified")
 type Client struct {
 	gh   *github.Client
 	etag *ETagStore
+	fc   *FileCache
 }
 
 type FileMeta struct {
@@ -26,7 +27,7 @@ type FileMeta struct {
 	ETag     string
 }
 
-func New(token, baseURL string, etag *ETagStore) *Client {
+func New(token, baseURL string, etag *ETagStore, fileCacheDir string) *Client {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	hc := oauth2.NewClient(context.Background(), ts)
 	gh := github.NewClient(hc)
@@ -41,7 +42,11 @@ func New(token, baseURL string, etag *ETagStore) *Client {
 	if etag == nil {
 		etag = NewETagStore()
 	}
-	return &Client{gh: gh, etag: etag}
+	fc := (*FileCache)(nil)
+	if fileCacheDir != "" {
+		fc = NewFileCache(fileCacheDir)
+	}
+	return &Client{gh: gh, etag: etag, fc: fc}
 }
 
 func (c *Client) SaveETags(path string) error {
@@ -161,6 +166,11 @@ func (c *Client) GetFile(ctx context.Context, repo *github.Repository, filePath 
 		// go-github uses ErrorResponse for non-2xx
 		var er *github.ErrorResponse
 		if errors.As(err, &er) && er.Response != nil && er.Response.StatusCode == http.StatusNotModified {
+			if c.fc != nil {
+				if cached, ok := c.fc.Get(cacheKey); ok {
+					return cached, FileMeta{CacheKey: cacheKey, ETag: ""}, nil
+				}
+			}
 			return "", FileMeta{CacheKey: cacheKey, ETag: ""}, ErrNotModified
 		}
 		return "", FileMeta{}, err
@@ -174,6 +184,9 @@ func (c *Client) GetFile(ctx context.Context, repo *github.Repository, filePath 
 	text, err := content.GetContent()
 	if err != nil {
 		return "", FileMeta{}, err
+	}
+	if c.fc != nil {
+		_ = c.fc.Set(cacheKey, text)
 	}
 	return text, FileMeta{CacheKey: cacheKey, ETag: etag}, nil
 }

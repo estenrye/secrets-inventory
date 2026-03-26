@@ -138,7 +138,7 @@ In the HTML report generator:
   - `secretFindings`
   - `envFindings`
   - `varFindings`
-  - (optional) `runtimeEnvFindings`
+  - `runtimeEnvFindings`
 
 - Render each slice with the same table template.
 
@@ -153,9 +153,4 @@ A simple approach is to implement a reusable template block for a table given a 
 ---
 
 ## Open question
-Do you want `runtime_env` to appear:
-
-- as a **separate** table (recommended), or
-- merged into the `Env` table?
-
-This choice is independent of the three required tables, but affects the final report structure.
+Decision: `runtime_env` findings will appear as a **separate fourth table** ("Runtime env"), not merged into the `Env` table.

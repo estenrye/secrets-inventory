@@ -4,18 +4,19 @@ import (
 	"html/template"
 	"os"
 	"sort"
+	"strings"
 
 	"secret-inventory/internal/model"
 )
 
 type summary struct {
-	RepoCount     int
-	FindingCount  int
-	Secrets       int
-	Vars          int
-	EnvExpr       int
-	RuntimeEnv    int
-	TopRefs       []refCount
+	RepoCount    int
+	FindingCount int
+	Secrets      int
+	Vars         int
+	EnvExpr      int
+	RuntimeEnv   int
+	TopRefs      []refCount
 }
 
 type refCount struct {
@@ -24,12 +25,33 @@ type refCount struct {
 }
 
 func WriteHTML(path string, snap model.Snapshot) error {
+	secretFindings := make([]model.Finding, 0)
+	envFindings := make([]model.Finding, 0)
+	varFindings := make([]model.Finding, 0)
+	runtimeEnvFindings := make([]model.Finding, 0)
+
 	counts := map[string]int{}
 	byType := map[string]int{}
 	for _, f := range snap.Findings {
 		byType[f.RefType]++
 		counts[f.RefType+":"+f.RefName]++
+		switch f.RefType {
+		case "secret":
+			secretFindings = append(secretFindings, f)
+		case "env":
+			envFindings = append(envFindings, f)
+		case "var":
+			varFindings = append(varFindings, f)
+		case "runtime_env":
+			runtimeEnvFindings = append(runtimeEnvFindings, f)
+		}
 	}
+
+	sortFindings(secretFindings)
+	sortFindings(envFindings)
+	sortFindings(varFindings)
+	sortFindings(runtimeEnvFindings)
+
 	var top []refCount
 	for k, c := range counts {
 		top = append(top, refCount{Key: k, Count: c})
@@ -61,9 +83,59 @@ func WriteHTML(path string, snap model.Snapshot) error {
 	}
 	defer f.Close()
 	return tmpl.Execute(f, struct {
-		Snapshot model.Snapshot
-		Summary  summary
-	}{Snapshot: snap, Summary: s})
+		Snapshot           model.Snapshot
+		Summary            summary
+		SecretFindings     []model.Finding
+		EnvFindings        []model.Finding
+		VarFindings        []model.Finding
+		RuntimeEnvFindings []model.Finding
+	}{
+		Snapshot:           snap,
+		Summary:            s,
+		SecretFindings:     secretFindings,
+		EnvFindings:        envFindings,
+		VarFindings:        varFindings,
+		RuntimeEnvFindings: runtimeEnvFindings,
+	})
+}
+
+func sortFindings(findings []model.Finding) {
+	sort.SliceStable(findings, func(i, j int) bool {
+		a := findings[i]
+		b := findings[j]
+
+		ar := a.RepoOwner + "/" + a.RepoName
+		br := b.RepoOwner + "/" + b.RepoName
+		if ar != br {
+			return ar < br
+		}
+		if a.WorkflowPath != b.WorkflowPath {
+			return a.WorkflowPath < b.WorkflowPath
+		}
+		if a.JobID != b.JobID {
+			return a.JobID < b.JobID
+		}
+		if a.StepIndex != b.StepIndex {
+			return a.StepIndex < b.StepIndex
+		}
+		if a.StepName != b.StepName {
+			return a.StepName < b.StepName
+		}
+		ak := a.FileKind
+		bk := b.FileKind
+		if ak != bk {
+			return ak < bk
+		}
+		ap := strings.TrimSpace(a.FilePath)
+		bp := strings.TrimSpace(b.FilePath)
+		if ap != bp {
+			return ap < bp
+		}
+		if a.RefName != b.RefName {
+			return a.RefName < b.RefName
+		}
+		return a.FieldPath < b.FieldPath
+	})
 }
 
 const htmlTemplate = `<!doctype html>
@@ -106,6 +178,14 @@ const htmlTemplate = `<!doctype html>
   </table>
 
   <h2>Findings</h2>
+  <p>
+    <a href="#secrets">Secrets</a> |
+    <a href="#env">Env</a> |
+    <a href="#vars">Vars</a> |
+    <a href="#runtime-env">Runtime env</a>
+  </p>
+
+  {{ define "findings_table" }}
   <table>
     <thead>
       <tr>
@@ -113,7 +193,7 @@ const htmlTemplate = `<!doctype html>
       </tr>
     </thead>
     <tbody>
-      {{ range .Snapshot.Findings }}
+      {{ range . }}
       <tr>
         <td><code>{{ .RepoOwner }}/{{ .RepoName }}</code></td>
         <td><code>{{ .WorkflowPath }}</code></td>
@@ -126,5 +206,18 @@ const htmlTemplate = `<!doctype html>
       {{ end }}
     </tbody>
   </table>
+  {{ end }}
+
+  <h3 id="secrets">Secrets</h3>
+  {{ template "findings_table" .SecretFindings }}
+
+  <h3 id="env">Env</h3>
+  {{ template "findings_table" .EnvFindings }}
+
+  <h3 id="vars">Vars</h3>
+  {{ template "findings_table" .VarFindings }}
+
+  <h3 id="runtime-env">Runtime env</h3>
+  {{ template "findings_table" .RuntimeEnvFindings }}
 </body>
 </html>`
