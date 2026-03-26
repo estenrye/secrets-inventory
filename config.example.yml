@@ -1,0 +1,32 @@
+github:
+  # For local CLI usage, prefer setting GITHUB_TOKEN in your environment.
+  # token: "ghp_..."
+  # For GitHub Enterprise Server, set base_url like: https://github.example.com/api/v3/
+  base_url: ""
+
+targets:
+  # Scan all repos you can read in these orgs:
+  orgs: []
+
+  # Scan public repos for these users (and any private repos your token can read):
+  users: []
+
+  # Or scan explicit repos (owner/name):
+  repos:
+    - "octocat/Hello-World"
+
+scanner:
+  # Which repo-local scripts to scan when referenced by workflow run steps and local actions.
+  script_extensions:
+    - ".sh"
+    - ".bash"
+    - ".zsh"
+    - ".py"
+    - ".js"
+    - ".ts"
+
+  # Hard limit for fetched/scanned files (bytes)
+  max_file_bytes: 524288
+
+  # Include runtime env var usages ($NAME) even when NAME can't be tied to workflow env or known secret/var names.
+  include_unknown_env: false
