@@ -3,6 +3,7 @@
 BINARY_NAME ?= secret-inventory
 CMD_DIR := ./cmd/secret-inventory
 OUT_DIR ?= ./bin
+REPORT_DIR ?= ./report
 
 help:
 	@echo "Targets:"
@@ -19,3 +20,16 @@ build:
 
 clean:
 	@rm -rf $(OUT_DIR)
+	@rm -rf $(REPORT_DIR)
+
+run-scan: build
+	@mkdir -p $(REPORT_DIR)/run-scan
+	$(OUT_DIR)/$(BINARY_NAME) scan --out $(REPORT_DIR)/run-scan --config ~/.config/secret-inventory.yml
+
+run-scan-deep-lacks-perms: build
+	@mkdir -p $(REPORT_DIR)/run-scan-deep-lacks-perms
+	$(OUT_DIR)/$(BINARY_NAME) scan --out $(REPORT_DIR)/run-scan-deep-lacks-perms --config ~/.config/secret-inventory.yml --deep-inspect
+
+run-scan-deep: build
+	@mkdir -p $(REPORT_DIR)/run-scan-deep
+	$(OUT_DIR)/$(BINARY_NAME) scan --out $(REPORT_DIR)/run-scan-deep --config ~/.config/secret-inventory-deep-scan.yml --deep-inspect

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/google/go-github/v84/github"
@@ -20,6 +21,23 @@ type Client struct {
 	gh   *github.Client
 	etag *ETagStore
 	fc   *FileCache
+}
+
+type listEnvironmentsResponse struct {
+	Environments []*github.Environment `json:"environments"`
+}
+
+type EnvironmentInfo struct {
+	Name string
+	ID   int64
+}
+
+type listEnvironmentSecretsResponse struct {
+	Secrets []*github.Secret `json:"secrets"`
+}
+
+type listEnvironmentVariablesResponse struct {
+	Variables []*github.ActionsVariable `json:"variables"`
 }
 
 type FileMeta struct {
@@ -210,4 +228,198 @@ func (c *Client) GetFile(ctx context.Context, repo *github.Repository, filePath 
 		_ = c.fc.Set(cacheKey, text)
 	}
 	return text, FileMeta{CacheKey: cacheKey, ETag: etag}, nil
+}
+
+func (c *Client) ListRepoSecretNames(ctx context.Context, owner, repo string) ([]string, error) {
+	opt := &github.ListOptions{PerPage: 100}
+	var out []string
+	for {
+		secrets, resp, err := c.gh.Actions.ListRepoSecrets(ctx, owner, repo, opt)
+		if err != nil {
+			return nil, err
+		}
+		if secrets != nil {
+			for _, s := range secrets.Secrets {
+				if s == nil {
+					continue
+				}
+				name := strings.TrimSpace(s.Name)
+				if name != "" {
+					out = append(out, name)
+				}
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (c *Client) ListRepoVariableNames(ctx context.Context, owner, repo string) ([]string, error) {
+	opt := &github.ListOptions{PerPage: 100}
+	var out []string
+	for {
+		vars, resp, err := c.gh.Actions.ListRepoVariables(ctx, owner, repo, opt)
+		if err != nil {
+			return nil, err
+		}
+		if vars != nil {
+			for _, v := range vars.Variables {
+				if v == nil {
+					continue
+				}
+				name := strings.TrimSpace(v.Name)
+				if name != "" {
+					out = append(out, name)
+				}
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (c *Client) ListOrgSecretNames(ctx context.Context, org string) ([]string, error) {
+	opt := &github.ListOptions{PerPage: 100}
+	var out []string
+	for {
+		secrets, resp, err := c.gh.Actions.ListOrgSecrets(ctx, org, opt)
+		if err != nil {
+			return nil, err
+		}
+		if secrets != nil {
+			for _, s := range secrets.Secrets {
+				if s == nil {
+					continue
+				}
+				name := strings.TrimSpace(s.Name)
+				if name != "" {
+					out = append(out, name)
+				}
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (c *Client) ListOrgVariableNames(ctx context.Context, org string) ([]string, error) {
+	opt := &github.ListOptions{PerPage: 100}
+	var out []string
+	for {
+		vars, resp, err := c.gh.Actions.ListOrgVariables(ctx, org, opt)
+		if err != nil {
+			return nil, err
+		}
+		if vars != nil {
+			for _, v := range vars.Variables {
+				if v == nil {
+					continue
+				}
+				name := strings.TrimSpace(v.Name)
+				if name != "" {
+					out = append(out, name)
+				}
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (c *Client) ListEnvironments(ctx context.Context, owner, repo string) ([]EnvironmentInfo, error) {
+	// Not currently exposed as a go-github convenience method in v84; use raw REST.
+	reqPath := path.Join("repos", owner, repo, "environments")
+	req, err := c.gh.NewRequest("GET", reqPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var respBody listEnvironmentsResponse
+	_, err = c.gh.Do(ctx, req, &respBody)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]EnvironmentInfo, 0)
+	for _, e := range respBody.Environments {
+		if e == nil {
+			continue
+		}
+		name := strings.TrimSpace(e.GetName())
+		if name == "" {
+			continue
+		}
+		out = append(out, EnvironmentInfo{Name: name, ID: e.GetID()})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
+func (c *Client) ListEnvironmentSecretNames(ctx context.Context, owner, repo, environment string) ([]string, error) {
+	reqPath := path.Join("repos", owner, repo, "environments", environment, "secrets")
+	req, err := c.gh.NewRequest("GET", reqPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var respBody listEnvironmentSecretsResponse
+	_, err = c.gh.Do(ctx, req, &respBody)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, s := range respBody.Secrets {
+		if s == nil {
+			continue
+		}
+		name := strings.TrimSpace(s.Name)
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (c *Client) ListEnvironmentVariableNames(ctx context.Context, owner, repo, environment string) ([]string, error) {
+	reqPath := path.Join("repos", owner, repo, "environments", environment, "variables")
+	req, err := c.gh.NewRequest("GET", reqPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var respBody listEnvironmentVariablesResponse
+	_, err = c.gh.Do(ctx, req, &respBody)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, v := range respBody.Variables {
+		if v == nil {
+			continue
+		}
+		name := strings.TrimSpace(v.Name)
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }

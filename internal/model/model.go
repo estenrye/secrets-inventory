@@ -10,6 +10,11 @@ type Snapshot struct {
 	Findings      []Finding `json:"findings"`
 
 	MergedFindings []MergedFinding `json:"merged_findings,omitempty"`
+
+	DeclaredSecrets   []DeclaredItem `json:"declared_secrets,omitempty"`
+	DeclaredVariables []DeclaredItem `json:"declared_variables,omitempty"`
+
+	DeepInspectWarnings []string `json:"deep_inspect_warnings,omitempty"`
 }
 
 type Repo struct {
@@ -25,6 +30,7 @@ type Finding struct {
 	RepoOwner    string `json:"repo_owner"`
 	RepoName     string `json:"repo_name"`
 	WorkflowPath string `json:"workflow_path"`
+	Environment  string `json:"environment,omitempty"`
 
 	JobID     string `json:"job_id,omitempty"`
 	StepIndex int    `json:"step_index,omitempty"`
@@ -53,6 +59,7 @@ type Finding struct {
 
 type FindingContext struct {
 	WorkflowPath string `json:"workflow_path"`
+	Environment  string `json:"environment,omitempty"`
 
 	JobID     string `json:"job_id,omitempty"`
 	StepIndex int    `json:"step_index,omitempty"`
@@ -95,6 +102,7 @@ type FileRef struct {
 	Kind      string // script|action_yaml|action_entrypoint
 
 	WorkflowPath string
+	Environment  string
 	JobID        string
 	StepIndex    int
 	StepName     string
@@ -105,6 +113,18 @@ type FileRef struct {
 	BaseDir string // used to resolve relative script paths for local actions
 
 	KnownEnv map[string]OriginHint
+}
+
+type DeclaredItem struct {
+	Name        string `json:"name"`
+	ScopeKind   string `json:"scope_kind"` // org|repo|environment
+	Org         string `json:"org,omitempty"`
+	RepoOwner   string `json:"repo_owner,omitempty"`
+	RepoName    string `json:"repo_name,omitempty"`
+	Environment string `json:"environment,omitempty"`
+	ManageURL   string `json:"manage_url,omitempty"`
+	Used        bool   `json:"used"`
+	UsedCount   int    `json:"used_count,omitempty"`
 }
 
 type OriginHint struct {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/go-github/v84/github"
 	"gopkg.in/yaml.v3"
 
 	"secret-inventory/internal/analyze"
@@ -167,6 +168,7 @@ func mergeFindings(snap *model.Snapshot) []model.MergedFinding {
 		for _, it := range g.items {
 			ctxs = append(ctxs, model.FindingContext{
 				WorkflowPath: it.WorkflowPath,
+				Environment:  it.Environment,
 				JobID:        it.JobID,
 				StepIndex:    it.StepIndex,
 				StepName:     it.StepName,
@@ -243,8 +245,9 @@ func mergeFindings(snap *model.Snapshot) []model.MergedFinding {
 }
 
 type scanArgs struct {
-	configPath string
-	outDir     string
+	configPath  string
+	outDir      string
+	deepInspect bool
 }
 
 func githubWebBase(apiBase string) string {
@@ -296,7 +299,7 @@ func (usageError) Error() string {
 }
 
 func usage() string {
-	return "Usage:\n  secret-inventory scan --config <config.yml> --out <out-dir>\n"
+	return "Usage:\n  secret-inventory scan --config <config.yml> --out <out-dir> [--deep-inspect]\n"
 }
 
 func parseScanArgs(argv []string) (scanArgs, error) {
@@ -305,6 +308,7 @@ func parseScanArgs(argv []string) (scanArgs, error) {
 	var a scanArgs
 	fs.StringVar(&a.configPath, "config", "", "path to config yaml")
 	fs.StringVar(&a.outDir, "out", "out", "output directory")
+	fs.BoolVar(&a.deepInspect, "deep-inspect", false, "list declared secrets/variables across org/repo/environment scopes and report unused")
 	if err := fs.Parse(argv); err != nil {
 		return scanArgs{}, err
 	}
@@ -447,6 +451,22 @@ func runScan(args scanArgs, stdout, stderr io.Writer) error {
 
 	snapshot.MergedFindings = mergeFindings(&snapshot)
 
+	if args.deepInspect {
+		declSecrets, declVars, diWarnings, err := deepInspectDeclared(ctx, gh, cfg.Targets, repos, snapshot.GitHubWebBase)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: deep inspection failed: %v\n", err)
+		}
+		snapshot.DeclaredSecrets = declSecrets
+		snapshot.DeclaredVariables = declVars
+		markDeclaredUsed(&snapshot)
+		if len(diWarnings) > 0 {
+			snapshot.DeepInspectWarnings = append(snapshot.DeepInspectWarnings, diWarnings...)
+			for _, w := range diWarnings {
+				fmt.Fprintf(stderr, "warning: %s\n", w)
+			}
+		}
+	}
+
 	snapshotPath := filepath.Join(args.outDir, "snapshot.json")
 	b, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -464,4 +484,370 @@ func runScan(args scanArgs, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "wrote %s\n", snapshotPath)
 	fmt.Fprintf(stdout, "wrote %s\n", htmlPath)
 	return nil
+}
+
+func deepInspectDeclared(ctx context.Context, gh *githubclient.Client, targets config.Targets, repos []*github.Repository, webBase string) ([]model.DeclaredItem, []model.DeclaredItem, []string, error) {
+	base := strings.TrimRight(strings.TrimSpace(webBase), "/")
+	if base == "" {
+		base = "https://github.com"
+	}
+
+	warnings := make([]string, 0)
+	addWarn := func(msg string) {
+		msg = strings.TrimSpace(msg)
+		if msg == "" {
+			return
+		}
+		warnings = append(warnings, msg)
+	}
+	permWarned := map[string]struct{}{}
+	addPermWarnOnce := func(key, msg string) {
+		if _, ok := permWarned[key]; ok {
+			return
+		}
+		permWarned[key] = struct{}{}
+		addWarn(msg)
+	}
+	statusCode := func(err error) int {
+		var er *github.ErrorResponse
+		if errors.As(err, &er) {
+			if er.Response != nil {
+				return er.Response.StatusCode
+			}
+		}
+		return 0
+	}
+	isPermErr := func(err error) bool {
+		sc := statusCode(err)
+		return sc == 403 || sc == 404
+	}
+
+	declSecrets := make([]model.DeclaredItem, 0)
+	declVars := make([]model.DeclaredItem, 0)
+
+	// Org scope (only for explicit org targets)
+	for _, org := range targets.Orgs {
+		org = strings.TrimSpace(org)
+		if org == "" {
+			continue
+		}
+		secrets, err := gh.ListOrgSecretNames(ctx, org)
+		if err != nil {
+			if isPermErr(err) {
+				addWarn(fmt.Sprintf("deep-inspect: insufficient permissions to list org secrets for %s (HTTP %d). See permissions.md to grant Actions secrets read.", org, statusCode(err)))
+				continue
+			}
+			addWarn(fmt.Sprintf("deep-inspect: failed to list org secrets for %s: %v", org, err))
+			continue
+		}
+		for _, name := range secrets {
+			declSecrets = append(declSecrets, model.DeclaredItem{
+				Name:      name,
+				ScopeKind: "org",
+				Org:       org,
+				ManageURL: fmt.Sprintf("%s/organizations/%s/settings/secrets/actions", base, org),
+			})
+		}
+
+		vars, err := gh.ListOrgVariableNames(ctx, org)
+		if err != nil {
+			if isPermErr(err) {
+				addWarn(fmt.Sprintf("deep-inspect: insufficient permissions to list org variables for %s (HTTP %d). See permissions.md to grant Actions variables read.", org, statusCode(err)))
+				continue
+			}
+			addWarn(fmt.Sprintf("deep-inspect: failed to list org variables for %s: %v", org, err))
+			continue
+		}
+		for _, name := range vars {
+			declVars = append(declVars, model.DeclaredItem{
+				Name:      name,
+				ScopeKind: "org",
+				Org:       org,
+				ManageURL: fmt.Sprintf("%s/organizations/%s/settings/variables/actions", base, org),
+			})
+		}
+	}
+
+	// Repo + environment scopes per repo
+	for _, r := range repos {
+		owner := r.GetOwner().GetLogin()
+		repo := r.GetName()
+		if owner == "" || repo == "" {
+			continue
+		}
+
+		repoSecrets, err := gh.ListRepoSecretNames(ctx, owner, repo)
+		if err != nil {
+			if isPermErr(err) {
+				addWarn(fmt.Sprintf("deep-inspect: insufficient permissions to list repo secrets for %s/%s (HTTP %d). See permissions.md to grant Actions secrets read.", owner, repo, statusCode(err)))
+			} else {
+				addWarn(fmt.Sprintf("deep-inspect: failed to list repo secrets for %s/%s: %v", owner, repo, err))
+			}
+		} else {
+			for _, name := range repoSecrets {
+				declSecrets = append(declSecrets, model.DeclaredItem{
+					Name:      name,
+					ScopeKind: "repo",
+					RepoOwner: owner,
+					RepoName:  repo,
+					ManageURL: fmt.Sprintf("%s/%s/%s/settings/secrets/actions", base, owner, repo),
+				})
+			}
+		}
+
+		repoVars, err := gh.ListRepoVariableNames(ctx, owner, repo)
+		if err != nil {
+			if isPermErr(err) {
+				addWarn(fmt.Sprintf("deep-inspect: insufficient permissions to list repo variables for %s/%s (HTTP %d). See permissions.md to grant Actions variables read.", owner, repo, statusCode(err)))
+			} else {
+				addWarn(fmt.Sprintf("deep-inspect: failed to list repo variables for %s/%s: %v", owner, repo, err))
+			}
+		} else {
+			for _, name := range repoVars {
+				declVars = append(declVars, model.DeclaredItem{
+					Name:      name,
+					ScopeKind: "repo",
+					RepoOwner: owner,
+					RepoName:  repo,
+					ManageURL: fmt.Sprintf("%s/%s/%s/settings/variables/actions", base, owner, repo),
+				})
+			}
+		}
+
+		envs, err := gh.ListEnvironments(ctx, owner, repo)
+		if err != nil {
+			if isPermErr(err) {
+				addPermWarnOnce(
+					"env|"+owner+"/"+repo,
+					fmt.Sprintf("deep-inspect: insufficient permissions to interrogate environments for %s/%s (HTTP %d). This prevents enumerating environment-scoped secrets/vars. See permissions.md and grant access to environments.", owner, repo, statusCode(err)),
+				)
+				continue
+			}
+			addWarn(fmt.Sprintf("deep-inspect: failed to list environments for %s/%s: %v", owner, repo, err))
+			continue
+		}
+		for _, env := range envs {
+			envName := strings.TrimSpace(env.Name)
+			if envName == "" {
+				continue
+			}
+			manageURL := fmt.Sprintf("%s/%s/%s/settings/environments", base, owner, repo)
+			if env.ID > 0 {
+				manageURL = fmt.Sprintf("%s/%s/%s/settings/environments/%d/edit", base, owner, repo, env.ID)
+			}
+
+			envSecrets, err := gh.ListEnvironmentSecretNames(ctx, owner, repo, envName)
+			if err != nil {
+				if isPermErr(err) {
+					addPermWarnOnce(
+						"env|"+owner+"/"+repo,
+						fmt.Sprintf("deep-inspect: insufficient permissions to interrogate environments for %s/%s (HTTP %d). This prevents enumerating environment-scoped secrets/vars. See permissions.md and grant access to environments.", owner, repo, statusCode(err)),
+					)
+				} else {
+					addWarn(fmt.Sprintf("deep-inspect: failed to list environment secrets for %s/%s env %q: %v", owner, repo, envName, err))
+				}
+			} else {
+				for _, name := range envSecrets {
+					declSecrets = append(declSecrets, model.DeclaredItem{
+						Name:        name,
+						ScopeKind:   "environment",
+						RepoOwner:   owner,
+						RepoName:    repo,
+						Environment: envName,
+						ManageURL:   manageURL,
+					})
+				}
+			}
+
+			envVars, err := gh.ListEnvironmentVariableNames(ctx, owner, repo, envName)
+			if err != nil {
+				if isPermErr(err) {
+					addPermWarnOnce(
+						"env|"+owner+"/"+repo,
+						fmt.Sprintf("deep-inspect: insufficient permissions to interrogate environments for %s/%s (HTTP %d). This prevents enumerating environment-scoped secrets/vars. See permissions.md and grant access to environments.", owner, repo, statusCode(err)),
+					)
+				} else {
+					addWarn(fmt.Sprintf("deep-inspect: failed to list environment variables for %s/%s env %q: %v", owner, repo, envName, err))
+				}
+			} else {
+				for _, name := range envVars {
+					declVars = append(declVars, model.DeclaredItem{
+						Name:        name,
+						ScopeKind:   "environment",
+						RepoOwner:   owner,
+						RepoName:    repo,
+						Environment: envName,
+						ManageURL:   manageURL,
+					})
+				}
+			}
+		}
+	}
+
+	sort.SliceStable(declSecrets, func(i, j int) bool {
+		a := declSecrets[i]
+		b := declSecrets[j]
+		ka := a.ScopeKind + "|" + a.Org + "|" + a.RepoOwner + "/" + a.RepoName + "|" + a.Environment + "|" + a.Name
+		kb := b.ScopeKind + "|" + b.Org + "|" + b.RepoOwner + "/" + b.RepoName + "|" + b.Environment + "|" + b.Name
+		return ka < kb
+	})
+	sort.SliceStable(declVars, func(i, j int) bool {
+		a := declVars[i]
+		b := declVars[j]
+		ka := a.ScopeKind + "|" + a.Org + "|" + a.RepoOwner + "/" + a.RepoName + "|" + a.Environment + "|" + a.Name
+		kb := b.ScopeKind + "|" + b.Org + "|" + b.RepoOwner + "/" + b.RepoName + "|" + b.Environment + "|" + b.Name
+		return ka < kb
+	})
+
+	sort.Strings(warnings)
+	if len(warnings) > 1 {
+		out := warnings[:0]
+		var last string
+		for i, w := range warnings {
+			if i == 0 || w != last {
+				out = append(out, w)
+				last = w
+			}
+		}
+		warnings = out
+	}
+	return declSecrets, declVars, warnings, nil
+}
+
+func markDeclaredUsed(snap *model.Snapshot) {
+	secretEnv := map[string]int{}
+	secretRepo := map[string]int{}
+	secretOrg := map[string]int{}
+	secretCandidates := map[string][]int{}
+
+	for i := range snap.DeclaredSecrets {
+		d := snap.DeclaredSecrets[i]
+		switch d.ScopeKind {
+		case "environment":
+			secretEnv[d.RepoOwner+"/"+d.RepoName+"|"+d.Environment+"|"+d.Name] = i
+		case "repo":
+			secretRepo[d.RepoOwner+"/"+d.RepoName+"|"+d.Name] = i
+		case "org":
+			secretOrg[d.Org+"|"+d.Name] = i
+		}
+		secretCandidates[d.Name] = append(secretCandidates[d.Name], i)
+	}
+
+	varEnv := map[string]int{}
+	varRepo := map[string]int{}
+	varOrg := map[string]int{}
+	varCandidates := map[string][]int{}
+
+	for i := range snap.DeclaredVariables {
+		d := snap.DeclaredVariables[i]
+		switch d.ScopeKind {
+		case "environment":
+			varEnv[d.RepoOwner+"/"+d.RepoName+"|"+d.Environment+"|"+d.Name] = i
+		case "repo":
+			varRepo[d.RepoOwner+"/"+d.RepoName+"|"+d.Name] = i
+		case "org":
+			varOrg[d.Org+"|"+d.Name] = i
+		}
+		varCandidates[d.Name] = append(varCandidates[d.Name], i)
+	}
+
+	mark := func(items []model.DeclaredItem, idx int, count int) {
+		if idx < 0 || idx >= len(items) {
+			return
+		}
+		items[idx].UsedCount += count
+		items[idx].Used = items[idx].UsedCount > 0
+	}
+
+	markSecretIdx := func(idx int, count int) {
+		if idx < 0 || idx >= len(snap.DeclaredSecrets) {
+			return
+		}
+		snap.DeclaredSecrets[idx].UsedCount += count
+		snap.DeclaredSecrets[idx].Used = snap.DeclaredSecrets[idx].UsedCount > 0
+	}
+	markVarIdx := func(idx int, count int) {
+		if idx < 0 || idx >= len(snap.DeclaredVariables) {
+			return
+		}
+		snap.DeclaredVariables[idx].UsedCount += count
+		snap.DeclaredVariables[idx].Used = snap.DeclaredVariables[idx].UsedCount > 0
+	}
+
+	for _, mf := range snap.MergedFindings {
+		if mf.RefType != "secret" && mf.RefType != "var" {
+			continue
+		}
+		name := mf.RefName
+		repoKey := mf.RepoOwner + "/" + mf.RepoName
+
+		envs := map[string]struct{}{}
+		for _, c := range mf.Contexts {
+			e := strings.TrimSpace(c.Environment)
+			if e == "" {
+				continue
+			}
+			envs[e] = struct{}{}
+		}
+		envName := ""
+		if len(envs) == 1 {
+			for e := range envs {
+				envName = e
+			}
+		}
+
+		if mf.RefType == "secret" {
+			if envName != "" {
+				if idx, ok := secretEnv[repoKey+"|"+envName+"|"+name]; ok {
+					markSecretIdx(idx, mf.Count)
+					continue
+				}
+			}
+			if idx, ok := secretRepo[repoKey+"|"+name]; ok {
+				markSecretIdx(idx, mf.Count)
+				continue
+			}
+			if idx, ok := secretOrg[mf.RepoOwner+"|"+name]; ok {
+				markSecretIdx(idx, mf.Count)
+				continue
+			}
+
+			cands := secretCandidates[name]
+			if len(cands) == 1 {
+				markSecretIdx(cands[0], mf.Count)
+				continue
+			}
+			for _, idx := range cands {
+				markSecretIdx(idx, mf.Count)
+			}
+		}
+
+		if mf.RefType == "var" {
+			if envName != "" {
+				if idx, ok := varEnv[repoKey+"|"+envName+"|"+name]; ok {
+					markVarIdx(idx, mf.Count)
+					continue
+				}
+			}
+			if idx, ok := varRepo[repoKey+"|"+name]; ok {
+				markVarIdx(idx, mf.Count)
+				continue
+			}
+			if idx, ok := varOrg[mf.RepoOwner+"|"+name]; ok {
+				markVarIdx(idx, mf.Count)
+				continue
+			}
+
+			cands := varCandidates[name]
+			if len(cands) == 1 {
+				markVarIdx(cands[0], mf.Count)
+				continue
+			}
+			for _, idx := range cands {
+				markVarIdx(idx, mf.Count)
+			}
+		}
+	}
+
+	_ = mark
 }

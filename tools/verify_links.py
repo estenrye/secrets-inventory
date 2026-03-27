@@ -51,13 +51,30 @@ def main() -> int:
         print("merged_with_contexts_list:", has_contexts)
         print("sample_merged:", merged[0])
 
+    declared_secrets = s.get("declared_secrets", []) or []
+    declared_vars = s.get("declared_variables", []) or []
+    print("declared_secrets:", len(declared_secrets))
+    print("declared_variables:", len(declared_vars))
+    if declared_secrets:
+        print("sample_declared_secret:", declared_secrets[0])
+    if declared_vars:
+        print("sample_declared_variable:", declared_vars[0])
+
     html = rep_path.read_text(encoding="utf-8")
     print("has_source_column:", "Source</th>" in html)
     print("has_count_column:", "Count</th>" in html)
+    print("has_manage_column:", "Manage</th>" in html)
     print("has_blob_links:", "blob/" in html)
+
+    print("has_unused_inventory_section:", "Unused (declared) inventory" in html)
+    print("has_unused_secrets_anchor:", "id=\"unused-secrets\"" in html)
+    print("has_unused_vars_anchor:", "id=\"unused-vars\"" in html)
 
     m = re.search(r'href="([^"]+)"[^>]*>view</a>', html)
     print("first_view_link:", m.group(1) if m else None)
+
+    m2 = re.search(r'href="([^"]+)"[^>]*>manage</a>', html)
+    print("first_manage_link:", m2.group(1) if m2 else None)
 
     return 0
 

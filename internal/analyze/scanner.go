@@ -91,16 +91,16 @@ func (s *Scanner) ScanWorkflowYAML(owner, repo, workflowPath, yamlText string) (
 	err := yaml.Unmarshal([]byte(yamlText), &root)
 	if err != nil {
 		// raw scan only
-		appendUnique(scanStringForRefs(owner, repo, workflowPath, "workflow_yaml", "", 0, "", "", "raw_scan", "", yamlText, known, li, 0, 0)...)
+		appendUnique(scanStringForRefs(owner, repo, workflowPath, "", "workflow_yaml", "", 0, "", "", "raw_scan", "", yamlText, known, li, 0, 0)...)
 		return findings, addFiles, err
 	}
 
 	// Always do a raw-text pass across the full YAML, even when parsing succeeds.
 	// This catches references in keys/sections that the AST-walk doesn't currently traverse.
-	appendUnique(scanStringForRefs(owner, repo, workflowPath, "workflow_yaml", "", 0, "", "", "raw_scan", "", yamlText, known, li, 0, 0)...)
+	appendUnique(scanStringForRefs(owner, repo, workflowPath, "", "workflow_yaml", "", 0, "", "", "raw_scan", "", yamlText, known, li, 0, 0)...)
 
 	// Walk the YAML for env declarations and for common string fields.
-	walkWorkflow(&root, func(fieldPath, jobID string, stepIndex int, stepName, contextKind, actionUses string, val string, line, col int) {
+	walkWorkflow(&root, func(environment, fieldPath, jobID string, stepIndex int, stepName, contextKind, actionUses string, val string, line, col int) {
 		if strings.HasPrefix(val, "env_key:") {
 			name := strings.TrimPrefix(val, "env_key:")
 			name = strings.TrimSpace(name)
@@ -109,7 +109,7 @@ func (s *Scanner) ScanWorkflowYAML(owner, repo, workflowPath, yamlText string) (
 			}
 			return
 		}
-		appendUnique(scanStringForRefs(owner, repo, workflowPath, "workflow_yaml", jobID, stepIndex, stepName, fieldPath, contextKind, actionUses, val, known, nil, line, col)...)
+		appendUnique(scanStringForRefs(owner, repo, workflowPath, environment, "workflow_yaml", jobID, stepIndex, stepName, fieldPath, contextKind, actionUses, val, known, nil, line, col)...)
 
 		// Discover script entrypoints in run blocks.
 		if contextKind == "run_script" {
@@ -128,6 +128,7 @@ func (s *Scanner) ScanWorkflowYAML(owner, repo, workflowPath, yamlText string) (
 					Path:         rel,
 					Kind:         "script",
 					WorkflowPath: workflowPath,
+					Environment:  environment,
 					JobID:        jobID,
 					StepIndex:    stepIndex,
 					StepName:     stepName,
@@ -149,6 +150,7 @@ func (s *Scanner) ScanWorkflowYAML(owner, repo, workflowPath, yamlText string) (
 				Path:         path.Join(aDir, "action.yml"),
 				Kind:         "action_yaml",
 				WorkflowPath: workflowPath,
+				Environment:  environment,
 				JobID:        jobID,
 				StepIndex:    stepIndex,
 				StepName:     stepName,
@@ -164,6 +166,7 @@ func (s *Scanner) ScanWorkflowYAML(owner, repo, workflowPath, yamlText string) (
 				Path:         path.Join(aDir, "action.yaml"),
 				Kind:         "action_yaml",
 				WorkflowPath: workflowPath,
+				Environment:  environment,
 				JobID:        jobID,
 				StepIndex:    stepIndex,
 				StepName:     stepName,
@@ -222,6 +225,7 @@ func (s *Scanner) ScanRepoFile(ref model.FileRef, content string) ([]model.Findi
 				RepoOwner:    ref.RepoOwner,
 				RepoName:     ref.RepoName,
 				WorkflowPath: ref.WorkflowPath,
+				Environment:  ref.Environment,
 				JobID:        ref.JobID,
 				StepIndex:    ref.StepIndex,
 				StepName:     ref.StepName,
@@ -239,7 +243,7 @@ func (s *Scanner) ScanRepoFile(ref model.FileRef, content string) ([]model.Findi
 		}
 
 		// Also scan for expression refs in case scripts contain them.
-		findings = append(findings, scanStringForRefs(ref.RepoOwner, ref.RepoName, ref.WorkflowPath, ref.Kind, ref.JobID, ref.StepIndex, ref.StepName, ref.FieldPath, ref.ContextKind, ref.ActionUses, content, ref.KnownEnv, li, 0, 0)...)
+		findings = append(findings, scanStringForRefs(ref.RepoOwner, ref.RepoName, ref.WorkflowPath, ref.Environment, ref.Kind, ref.JobID, ref.StepIndex, ref.StepName, ref.FieldPath, ref.ContextKind, ref.ActionUses, content, ref.KnownEnv, li, 0, 0)...)
 
 	case "action_yaml":
 		var root yaml.Node
@@ -250,7 +254,7 @@ func (s *Scanner) ScanRepoFile(ref model.FileRef, content string) ([]model.Findi
 		// Composite action run steps
 		// Also discover runs.main for node actions.
 		walkActionYAML(&root, func(fieldPath, kind, val string, line, col int) {
-			findings = append(findings, scanStringForRefs(ref.RepoOwner, ref.RepoName, ref.WorkflowPath, "action_yaml", ref.JobID, ref.StepIndex, ref.StepName, fieldPath, kind, ref.ActionUses, val, ref.KnownEnv, nil, line, col)...)
+			findings = append(findings, scanStringForRefs(ref.RepoOwner, ref.RepoName, ref.WorkflowPath, ref.Environment, "action_yaml", ref.JobID, ref.StepIndex, ref.StepName, fieldPath, kind, ref.ActionUses, val, ref.KnownEnv, nil, line, col)...)
 			if kind == "run_script" {
 				for _, m := range reRunScriptPath.FindAllStringSubmatch(val, -1) {
 					p := m[1]
@@ -271,6 +275,7 @@ func (s *Scanner) ScanRepoFile(ref model.FileRef, content string) ([]model.Findi
 						Path:         resolved,
 						Kind:         "script",
 						WorkflowPath: ref.WorkflowPath,
+						Environment:  ref.Environment,
 						JobID:        ref.JobID,
 						StepIndex:    ref.StepIndex,
 						StepName:     ref.StepName,
@@ -300,6 +305,7 @@ func (s *Scanner) ScanRepoFile(ref model.FileRef, content string) ([]model.Findi
 					Path:         resolved,
 					Kind:         "action_entrypoint",
 					WorkflowPath: ref.WorkflowPath,
+					Environment:  ref.Environment,
 					JobID:        ref.JobID,
 					StepIndex:    ref.StepIndex,
 					StepName:     ref.StepName,
@@ -326,7 +332,7 @@ func (s *Scanner) allowedScript(p string) bool {
 	return false
 }
 
-func scanStringForRefs(owner, repo, workflowPath, fileKind, jobID string, stepIndex int, stepName, fieldPath, contextKind, actionUses, val string, known map[string]model.OriginHint, li *lineIndex, baseLine, baseCol int) []model.Finding {
+func scanStringForRefs(owner, repo, workflowPath, environment, fileKind, jobID string, stepIndex int, stepName, fieldPath, contextKind, actionUses, val string, known map[string]model.OriginHint, li *lineIndex, baseLine, baseCol int) []model.Finding {
 	var out []model.Finding
 	locFor := func(startIdx int) (int, int) {
 		if li != nil {
@@ -361,6 +367,7 @@ func scanStringForRefs(owner, repo, workflowPath, fileKind, jobID string, stepIn
 			RepoOwner:    owner,
 			RepoName:     repo,
 			WorkflowPath: workflowPath,
+			Environment:  environment,
 			JobID:        jobID,
 			StepIndex:    stepIndex,
 			StepName:     stepName,
@@ -423,7 +430,7 @@ func extractEnvKeysFromFieldPath(_ string, _ string) []string {
 	return nil
 }
 
-func walkWorkflow(root *yaml.Node, fn func(fieldPath, jobID string, stepIndex int, stepName, contextKind, actionUses string, val string, line, col int)) {
+func walkWorkflow(root *yaml.Node, fn func(environment, fieldPath, jobID string, stepIndex int, stepName, contextKind, actionUses string, val string, line, col int)) {
 	// This is a best-effort walker tailored to common Actions workflow layouts.
 	// root is typically a DocumentNode with one child.
 	if root == nil {
@@ -445,12 +452,12 @@ func walkWorkflow(root *yaml.Node, fn func(fieldPath, jobID string, stepIndex in
 			for i := 0; i < len(envNode.Content); i += 2 {
 				k := envNode.Content[i]
 				if k != nil && k.Kind == yaml.ScalarNode && k.Value != "" {
-					fn("env."+k.Value, "", 0, "", "env_block", "", "env_key:"+k.Value, k.Line, k.Column)
+					fn("", "env."+k.Value, "", 0, "", "env_block", "", "env_key:"+k.Value, k.Line, k.Column)
 				}
 			}
 		}
 		yamlWalkStrings(envNode, "env", func(p, v string, line, col int) {
-			fn(p, "", 0, "", "env_block", "", v, line, col)
+			fn("", p, "", 0, "", "env_block", "", v, line, col)
 		})
 	}
 
@@ -466,6 +473,11 @@ func walkWorkflow(root *yaml.Node, fn func(fieldPath, jobID string, stepIndex in
 			continue
 		}
 
+		jobEnv := ""
+		if e := mappingGet(jobNode, "environment"); e != nil && e.Kind == yaml.ScalarNode {
+			jobEnv = strings.TrimSpace(e.Value)
+		}
+
 		// job env
 		envNode := mappingGet(jobNode, "env")
 		if envNode != nil {
@@ -474,12 +486,12 @@ func walkWorkflow(root *yaml.Node, fn func(fieldPath, jobID string, stepIndex in
 				for i := 0; i < len(envNode.Content); i += 2 {
 					k := envNode.Content[i]
 					if k != nil && k.Kind == yaml.ScalarNode && k.Value != "" {
-						fn("jobs."+jobID+".env."+k.Value, jobID, 0, "", "env_block", "", "env_key:"+k.Value, k.Line, k.Column)
+						fn(jobEnv, "jobs."+jobID+".env."+k.Value, jobID, 0, "", "env_block", "", "env_key:"+k.Value, k.Line, k.Column)
 					}
 				}
 			}
 			yamlWalkStrings(envNode, "jobs."+jobID+".env", func(p, v string, line, col int) {
-				fn(p, jobID, 0, "", "env_block", "", v, line, col)
+				fn(jobEnv, p, jobID, 0, "", "env_block", "", v, line, col)
 			})
 		}
 
@@ -500,24 +512,24 @@ func walkWorkflow(root *yaml.Node, fn func(fieldPath, jobID string, stepIndex in
 						for i := 0; i < len(e.Content); i += 2 {
 							k := e.Content[i]
 							if k != nil && k.Kind == yaml.ScalarNode && k.Value != "" {
-								fn(fmtPath("jobs.%s.steps[%d].env.%s", jobID, si, k.Value), jobID, si, stepName, "env_block", "", "env_key:"+k.Value, k.Line, k.Column)
+								fn(jobEnv, fmtPath("jobs.%s.steps[%d].env.%s", jobID, si, k.Value), jobID, si, stepName, "env_block", "", "env_key:"+k.Value, k.Line, k.Column)
 							}
 						}
 					}
 					yamlWalkStrings(e, fmtPath("jobs.%s.steps[%d].env", jobID, si), func(p, v string, line, col int) {
-						fn(p, jobID, si, stepName, "env_block", "", v, line, col)
+						fn(jobEnv, p, jobID, si, stepName, "env_block", "", v, line, col)
 					})
 				}
 
 				if r := mappingGet(step, "run"); r != nil && r.Kind == yaml.ScalarNode {
-					fn(fmtPath("jobs.%s.steps[%d].run", jobID, si), jobID, si, stepName, "run_script", "", r.Value, r.Line, r.Column)
+					fn(jobEnv, fmtPath("jobs.%s.steps[%d].run", jobID, si), jobID, si, stepName, "run_script", "", r.Value, r.Line, r.Column)
 				}
 				if u := mappingGet(step, "uses"); u != nil && u.Kind == yaml.ScalarNode {
-					fn(fmtPath("jobs.%s.steps[%d].uses", jobID, si), jobID, si, stepName, "uses_action", "", u.Value, u.Line, u.Column)
+					fn(jobEnv, fmtPath("jobs.%s.steps[%d].uses", jobID, si), jobID, si, stepName, "uses_action", "", u.Value, u.Line, u.Column)
 				}
 				if w := mappingGet(step, "with"); w != nil {
 					yamlWalkStrings(w, fmtPath("jobs.%s.steps[%d].with", jobID, si), func(p, v string, line, col int) {
-						fn(p, jobID, si, stepName, "with_input", "", v, line, col)
+						fn(jobEnv, p, jobID, si, stepName, "with_input", "", v, line, col)
 					})
 				}
 			}
