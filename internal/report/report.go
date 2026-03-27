@@ -65,25 +65,123 @@ func WriteHTML(path string, snap model.Snapshot) error {
 		return url
 	}
 
+	mergedJob := func(f model.MergedFinding) string {
+		if len(f.Contexts) == 0 {
+			return ""
+		}
+		for i := 0; i < len(f.Contexts); i++ {
+			v := strings.TrimSpace(f.Contexts[i].JobID)
+			if v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	mergedContexts := func(f model.MergedFinding) string {
+		if len(f.Contexts) == 0 {
+			return ""
+		}
+		seen := map[string]struct{}{}
+		out := make([]string, 0, len(f.Contexts))
+		for _, c := range f.Contexts {
+			k := strings.TrimSpace(c.ContextKind)
+			if k == "" {
+				continue
+			}
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
+			out = append(out, k)
+		}
+		return strings.Join(out, "\n")
+	}
+
+	mergedStep := func(f model.MergedFinding) string {
+		if len(f.Contexts) == 0 {
+			return ""
+		}
+		for i := 0; i < len(f.Contexts); i++ {
+			v := strings.TrimSpace(f.Contexts[i].StepName)
+			if v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	mergedSourceURL := func(f model.MergedFinding) string {
+		filePath := ""
+		switch f.FileKind {
+		case "workflow_yaml":
+			filePath = strings.TrimSpace(f.WorkflowPath)
+		default:
+			filePath = strings.TrimSpace(f.FilePath)
+		}
+		if filePath == "" {
+			return ""
+		}
+		if strings.Contains(filePath, "__THIS_REPO__") || strings.Contains(filePath, "__BUILDER_CHECKOUT_DIR__") {
+			return ""
+		}
+		ref := repoRef[f.RepoOwner+"/"+f.RepoName]
+		if ref == "" {
+			return ""
+		}
+		base := strings.TrimRight(strings.TrimSpace(snap.GitHubWebBase), "/")
+		if base == "" {
+			base = "https://github.com"
+		}
+		url := fmt.Sprintf("%s/%s/%s/blob/%s/%s", base, f.RepoOwner, f.RepoName, ref, filePath)
+		if f.LineStart > 0 {
+			url = fmt.Sprintf("%s#L%d", url, f.LineStart)
+		}
+		return url
+	}
+
 	secretFindings := make([]model.Finding, 0)
 	envFindings := make([]model.Finding, 0)
 	varFindings := make([]model.Finding, 0)
 	runtimeEnvFindings := make([]model.Finding, 0)
 
+	secretMerged := make([]model.MergedFinding, 0)
+	envMerged := make([]model.MergedFinding, 0)
+	varMerged := make([]model.MergedFinding, 0)
+	runtimeEnvMerged := make([]model.MergedFinding, 0)
+
 	counts := map[string]int{}
 	byType := map[string]int{}
-	for _, f := range snap.Findings {
-		byType[f.RefType]++
-		counts[f.RefType+":"+f.RefName]++
-		switch f.RefType {
-		case "secret":
-			secretFindings = append(secretFindings, f)
-		case "env":
-			envFindings = append(envFindings, f)
-		case "var":
-			varFindings = append(varFindings, f)
-		case "runtime_env":
-			runtimeEnvFindings = append(runtimeEnvFindings, f)
+	useMerged := len(snap.MergedFindings) > 0
+	if useMerged {
+		for _, f := range snap.MergedFindings {
+			byType[f.RefType] += f.Count
+			counts[f.RefType+":"+f.RefName] += f.Count
+			switch f.RefType {
+			case "secret":
+				secretMerged = append(secretMerged, f)
+			case "env":
+				envMerged = append(envMerged, f)
+			case "var":
+				varMerged = append(varMerged, f)
+			case "runtime_env":
+				runtimeEnvMerged = append(runtimeEnvMerged, f)
+			}
+		}
+	} else {
+		for _, f := range snap.Findings {
+			byType[f.RefType]++
+			counts[f.RefType+":"+f.RefName]++
+			switch f.RefType {
+			case "secret":
+				secretFindings = append(secretFindings, f)
+			case "env":
+				envFindings = append(envFindings, f)
+			case "var":
+				varFindings = append(varFindings, f)
+			case "runtime_env":
+				runtimeEnvFindings = append(runtimeEnvFindings, f)
+			}
 		}
 	}
 
@@ -91,6 +189,11 @@ func WriteHTML(path string, snap model.Snapshot) error {
 	sortFindings(envFindings)
 	sortFindings(varFindings)
 	sortFindings(runtimeEnvFindings)
+
+	sort.SliceStable(secretMerged, func(i, j int) bool { return secretMerged[i].SourceKey < secretMerged[j].SourceKey })
+	sort.SliceStable(envMerged, func(i, j int) bool { return envMerged[i].SourceKey < envMerged[j].SourceKey })
+	sort.SliceStable(varMerged, func(i, j int) bool { return varMerged[i].SourceKey < varMerged[j].SourceKey })
+	sort.SliceStable(runtimeEnvMerged, func(i, j int) bool { return runtimeEnvMerged[i].SourceKey < runtimeEnvMerged[j].SourceKey })
 
 	var top []refCount
 	for k, c := range counts {
@@ -107,17 +210,26 @@ func WriteHTML(path string, snap model.Snapshot) error {
 	}
 
 	s := summary{
-		RepoCount:    len(snap.Repos),
-		FindingCount: len(snap.Findings),
-		Secrets:      byType["secret"],
-		Vars:         byType["var"],
-		EnvExpr:      byType["env"],
-		RuntimeEnv:   byType["runtime_env"],
-		TopRefs:      top,
+		RepoCount: len(snap.Repos),
+		FindingCount: func() int {
+			if useMerged {
+				return len(snap.MergedFindings)
+			}
+			return len(snap.Findings)
+		}(),
+		Secrets:    byType["secret"],
+		Vars:       byType["var"],
+		EnvExpr:    byType["env"],
+		RuntimeEnv: byType["runtime_env"],
+		TopRefs:    top,
 	}
 
 	tmpl := template.Must(template.New("r").Funcs(template.FuncMap{
-		"sourceURL": sourceURL,
+		"sourceURL":       sourceURL,
+		"mergedSourceURL": mergedSourceURL,
+		"mergedJob":       mergedJob,
+		"mergedStep":      mergedStep,
+		"mergedContexts":  mergedContexts,
 	}).Parse(htmlTemplate))
 	f, err := os.Create(path)
 	if err != nil {
@@ -131,6 +243,11 @@ func WriteHTML(path string, snap model.Snapshot) error {
 		EnvFindings        []model.Finding
 		VarFindings        []model.Finding
 		RuntimeEnvFindings []model.Finding
+		SecretMerged       []model.MergedFinding
+		EnvMerged          []model.MergedFinding
+		VarMerged          []model.MergedFinding
+		RuntimeEnvMerged   []model.MergedFinding
+		UseMerged          bool
 	}{
 		Snapshot:           snap,
 		Summary:            s,
@@ -138,6 +255,11 @@ func WriteHTML(path string, snap model.Snapshot) error {
 		EnvFindings:        envFindings,
 		VarFindings:        varFindings,
 		RuntimeEnvFindings: runtimeEnvFindings,
+		SecretMerged:       secretMerged,
+		EnvMerged:          envMerged,
+		VarMerged:          varMerged,
+		RuntimeEnvMerged:   runtimeEnvMerged,
+		UseMerged:          useMerged,
 	})
 }
 
@@ -216,6 +338,7 @@ const htmlTemplate = `<!doctype html>
       {{ range .Summary.TopRefs }}
       <tr><td><code>{{ .Key }}</code></td><td>{{ .Count }}</td></tr>
       {{ end }}
+
     </tbody>
   </table>
 
@@ -226,6 +349,31 @@ const htmlTemplate = `<!doctype html>
     <a href="#vars">Vars</a> |
     <a href="#runtime-env">Runtime env</a>
   </p>
+
+  {{ define "merged_table" }}
+  <table>
+    <thead>
+      <tr>
+        <th>Repo</th><th>Workflow</th><th>Job</th><th>Step</th><th>File</th><th>Ref</th><th>Count</th><th>Contexts</th><th>Source</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range . }}
+      <tr>
+        <td><code>{{ .RepoOwner }}/{{ .RepoName }}</code></td>
+        <td><code>{{ .WorkflowPath }}</code></td>
+        <td><code>{{ mergedJob . }}</code></td>
+        <td><code>{{ mergedStep . }}</code></td>
+        <td><code>{{ .FileKind }}{{ if .FilePath }}:{{ .FilePath }}{{ end }}</code></td>
+        <td><code>{{ .RefType }}.{{ .RefName }}</code></td>
+        <td>{{ .Count }}</td>
+        <td><pre style="margin:0; white-space:pre-wrap;"><code>{{ mergedContexts . }}</code></pre></td>
+        <td>{{ $u := mergedSourceURL . }}{{ if $u }}<a href="{{ $u }}" target="_blank" rel="noreferrer">view</a>{{ else }}n/a{{ end }}</td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ end }}
 
   {{ define "findings_table" }}
   <table>
@@ -252,15 +400,15 @@ const htmlTemplate = `<!doctype html>
   {{ end }}
 
   <h3 id="secrets">Secrets</h3>
-  {{ template "findings_table" .SecretFindings }}
+  {{ if .UseMerged }}{{ template "merged_table" .SecretMerged }}{{ else }}{{ template "findings_table" .SecretFindings }}{{ end }}
 
   <h3 id="env">Env</h3>
-  {{ template "findings_table" .EnvFindings }}
+  {{ if .UseMerged }}{{ template "merged_table" .EnvMerged }}{{ else }}{{ template "findings_table" .EnvFindings }}{{ end }}
 
   <h3 id="vars">Vars</h3>
-  {{ template "findings_table" .VarFindings }}
+  {{ if .UseMerged }}{{ template "merged_table" .VarMerged }}{{ else }}{{ template "findings_table" .VarFindings }}{{ end }}
 
   <h3 id="runtime-env">Runtime env</h3>
-  {{ template "findings_table" .RuntimeEnvFindings }}
+  {{ if .UseMerged }}{{ template "merged_table" .RuntimeEnvMerged }}{{ else }}{{ template "findings_table" .RuntimeEnvFindings }}{{ end }}
 </body>
 </html>`

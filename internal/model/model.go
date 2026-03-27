@@ -8,6 +8,8 @@ type Snapshot struct {
 	Targets       any       `json:"targets"`
 	Repos         []Repo    `json:"repos"`
 	Findings      []Finding `json:"findings"`
+
+	MergedFindings []MergedFinding `json:"merged_findings,omitempty"`
 }
 
 type Repo struct {
@@ -41,10 +43,49 @@ type Finding struct {
 
 	Origin string `json:"origin,omitempty"` // workflow_env|expr_secret|expr_var|declared_secret|declared_variable|unknown
 
+	SourceKey string `json:"source_key,omitempty"`
+
 	LineStart int `json:"line_start,omitempty"`
 	LineEnd   int `json:"line_end,omitempty"`
 	ColStart  int `json:"col_start,omitempty"`
 	ColEnd    int `json:"col_end,omitempty"`
+}
+
+type FindingContext struct {
+	WorkflowPath string `json:"workflow_path"`
+
+	JobID     string `json:"job_id,omitempty"`
+	StepIndex int    `json:"step_index,omitempty"`
+	StepName  string `json:"step_name,omitempty"`
+	FieldPath string `json:"field_path,omitempty"`
+
+	ContextKind string `json:"context_kind,omitempty"`
+	ActionUses  string `json:"action_uses,omitempty"`
+	Origin      string `json:"origin,omitempty"`
+}
+
+type MergedFinding struct {
+	RepoOwner string `json:"repo_owner"`
+	RepoName  string `json:"repo_name"`
+
+	RefType    string `json:"ref_type"` // secret|var|env|runtime_env
+	RefName    string `json:"ref_name"`
+	Expression string `json:"expression,omitempty"`
+
+	FilePath string `json:"file_path,omitempty"`
+	FileKind string `json:"file_kind"` // workflow_yaml|script|action_yaml|action_entrypoint
+
+	WorkflowPath string `json:"workflow_path,omitempty"`
+
+	LineStart int `json:"line_start,omitempty"`
+	LineEnd   int `json:"line_end,omitempty"`
+	ColStart  int `json:"col_start,omitempty"`
+	ColEnd    int `json:"col_end,omitempty"`
+
+	SourceKey string `json:"source_key,omitempty"`
+	Count     int    `json:"count"`
+
+	Contexts []FindingContext `json:"contexts"`
 }
 
 type FileRef struct {
