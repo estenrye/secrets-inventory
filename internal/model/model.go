@@ -11,10 +11,22 @@ type Snapshot struct {
 
 	MergedFindings []MergedFinding `json:"merged_findings,omitempty"`
 
+	ScanWarnings []ScanWarning `json:"scan_warnings,omitempty"`
+
 	DeclaredSecrets   []DeclaredItem `json:"declared_secrets,omitempty"`
 	DeclaredVariables []DeclaredItem `json:"declared_variables,omitempty"`
 
 	DeepInspectWarnings []string `json:"deep_inspect_warnings,omitempty"`
+}
+
+type ScanWarning struct {
+	Kind       string `json:"kind"` // workflow_read_forbidden|script_read_forbidden|local_action_read_forbidden
+	RepoOwner  string `json:"repo_owner"`
+	RepoName   string `json:"repo_name"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+	Operation  string `json:"operation,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Message    string `json:"message"`
 }
 
 type Repo struct {

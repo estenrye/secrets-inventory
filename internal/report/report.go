@@ -33,6 +33,60 @@ type refCount struct {
 }
 
 func WriteHTML(path string, snap model.Snapshot) error {
+	groupScanWarnings := func(warnings []model.ScanWarning) []warningGroup {
+		byKey := map[string]*warningGroup{}
+		order := make([]string, 0)
+		for _, w := range warnings {
+			msg := strings.TrimSpace(w.Message)
+			if msg == "" {
+				continue
+			}
+			repo := strings.TrimSpace(w.RepoOwner) + "/" + strings.TrimSpace(w.RepoName)
+			g, ok := byKey[msg]
+			if !ok {
+				g = &warningGroup{Message: msg, Repos: nil}
+				byKey[msg] = g
+				order = append(order, msg)
+			}
+			if repo != "/" {
+				g.Repos = append(g.Repos, repo)
+			}
+		}
+
+		out := make([]warningGroup, 0, len(order))
+		for _, k := range order {
+			g := byKey[k]
+			if g == nil {
+				continue
+			}
+			sort.Strings(g.Repos)
+			if len(g.Repos) > 1 {
+				u := g.Repos[:0]
+				var last string
+				for i, r := range g.Repos {
+					if i == 0 || r != last {
+						u = append(u, r)
+						last = r
+					}
+				}
+				g.Repos = u
+			}
+			out = append(out, *g)
+		}
+		for i := range out {
+			if len(out[i].Repos) == 0 {
+				out[i].ReposHTML = ""
+				continue
+			}
+			parts := make([]string, 0, len(out[i].Repos))
+			for _, r := range out[i].Repos {
+				parts = append(parts, "<code>"+template.HTMLEscapeString(r)+"</code>")
+			}
+			out[i].ReposHTML = template.HTML(strings.Join(parts, ", "))
+		}
+		return out
+	}
+
 	groupDeepInspectWarnings := func(warnings []string) []warningGroup {
 		warnings = append([]string(nil), warnings...)
 		for i := range warnings {
@@ -100,6 +154,7 @@ func WriteHTML(path string, snap model.Snapshot) error {
 		return out
 	}
 
+	scanWarningGroups := groupScanWarnings(snap.ScanWarnings)
 	deepInspectWarningGroups := groupDeepInspectWarnings(snap.DeepInspectWarnings)
 
 	// Build lookup maps for declared inventory to resolve manage links.
@@ -484,6 +539,7 @@ func WriteHTML(path string, snap model.Snapshot) error {
 	defer f.Close()
 	return tmpl.Execute(f, struct {
 		Snapshot           model.Snapshot
+		ScanWarningGroups  []warningGroup
 		DeepInspectGroups  []warningGroup
 		Summary            summary
 		SecretFindings     []model.Finding
@@ -501,6 +557,7 @@ func WriteHTML(path string, snap model.Snapshot) error {
 		UnusedVariables    []model.DeclaredItem
 	}{
 		Snapshot:           snap,
+		ScanWarningGroups:  scanWarningGroups,
 		DeepInspectGroups:  deepInspectWarningGroups,
 		Summary:            s,
 		SecretFindings:     secretFindings,
@@ -638,6 +695,28 @@ const htmlTemplate = `<!doctype html>
 <body>
   <h1>Secret Inventory Report</h1>
   <p>Generated at: <code>{{ .Snapshot.GeneratedAt }}</code></p>
+
+  {{ if .ScanWarningGroups }}
+  <div class="warn">
+    <strong>Scan warnings</strong>
+    <p>
+      Some repositories could not be fully scanned due to insufficient permissions.
+      Update your GitHub token/app permissions and re-run.
+      See <code>permissions.md</code> in this repo.
+    </p>
+    <table>
+      <thead><tr><th>Warning</th><th>Repos</th></tr></thead>
+      <tbody>
+        {{ range .ScanWarningGroups }}
+        <tr>
+          <td><code>{{ .Message }}</code></td>
+          <td>{{ if .ReposHTML }}{{ .ReposHTML }}{{ else }}n/a{{ end }}</td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </div>
+  {{ end }}
 
   {{ if .DeepInspectGroups }}
   <div class="warn">

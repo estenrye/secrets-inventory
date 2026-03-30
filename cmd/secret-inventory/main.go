@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -248,6 +249,41 @@ type scanArgs struct {
 	configPath  string
 	outDir      string
 	deepInspect bool
+	verbose     bool
+}
+
+func httpStatusFromErr(err error) (int, bool) {
+	var er *github.ErrorResponse
+	if errors.As(err, &er) && er.Response != nil {
+		return er.Response.StatusCode, true
+	}
+	return 0, false
+}
+
+func repoKey(owner, repo string) string {
+	return owner + "/" + repo
+}
+
+func scanWarningMessage(kind string) string {
+	switch kind {
+	case "workflow_read_forbidden":
+		return "Token lacks permission to read GitHub Actions workflow files for these repositories (requires Contents: Read)."
+	case "script_read_forbidden", "local_action_read_forbidden":
+		return "Token lacks permission to read referenced scripts/local actions for these repositories (requires Contents: Read)."
+	default:
+		return "Token lacks permission to read repository contents for these repositories (requires Contents: Read)."
+	}
+}
+
+func scanWarningConsoleLine(kind, owner, repo string) string {
+	switch kind {
+	case "workflow_read_forbidden":
+		return fmt.Sprintf("repo %s cannot be scanned: GitHub returned 403 when reading workflow files (requires Contents: Read)", repoKey(owner, repo))
+	case "script_read_forbidden", "local_action_read_forbidden":
+		return fmt.Sprintf("repo %s scanned partially: GitHub returned 403 when reading referenced scripts/local actions (requires Contents: Read)", repoKey(owner, repo))
+	default:
+		return fmt.Sprintf("repo %s scanned partially: GitHub returned 403 when reading repository contents (requires Contents: Read)", repoKey(owner, repo))
+	}
 }
 
 func githubWebBase(apiBase string) string {
@@ -299,7 +335,7 @@ func (usageError) Error() string {
 }
 
 func usage() string {
-	return "Usage:\n  secret-inventory scan --config <config.yml> --out <out-dir> [--deep-inspect]\n"
+	return "Usage:\n  secret-inventory scan --config <config.yml> --out <out-dir> [--deep-inspect] [--verbose]\n"
 }
 
 func parseScanArgs(argv []string) (scanArgs, error) {
@@ -309,6 +345,7 @@ func parseScanArgs(argv []string) (scanArgs, error) {
 	fs.StringVar(&a.configPath, "config", "", "path to config yaml")
 	fs.StringVar(&a.outDir, "out", "out", "output directory")
 	fs.BoolVar(&a.deepInspect, "deep-inspect", false, "list declared secrets/variables across org/repo/environment scopes and report unused")
+	fs.BoolVar(&a.verbose, "verbose", false, "emit verbose warnings as they occur")
 	if err := fs.Parse(argv); err != nil {
 		return scanArgs{}, err
 	}
@@ -367,6 +404,38 @@ func runScan(args scanArgs, stdout, stderr io.Writer) error {
 		Findings:      []model.Finding{},
 	}
 
+	warnKinds := map[string]struct{}{
+		"workflow_read_forbidden":     {},
+		"script_read_forbidden":       {},
+		"local_action_read_forbidden": {},
+	}
+	_ = warnKinds
+	warnByRepo := map[string]map[string]model.ScanWarning{}
+	addWarn := func(kind, owner, repo, operation, p string, status int) {
+		k := repoKey(owner, repo)
+		m := warnByRepo[k]
+		if m == nil {
+			m = map[string]model.ScanWarning{}
+			warnByRepo[k] = m
+		}
+		if _, ok := m[kind]; ok {
+			return
+		}
+		w := model.ScanWarning{
+			Kind:       kind,
+			RepoOwner:  owner,
+			RepoName:   repo,
+			HTTPStatus: status,
+			Operation:  operation,
+			Path:       p,
+			Message:    scanWarningMessage(kind),
+		}
+		m[kind] = w
+		if args.verbose {
+			fmt.Fprintf(stderr, "warning: %s\n", scanWarningConsoleLine(kind, owner, repo))
+		}
+	}
+
 	scanner := analyze.NewScanner(analyze.ScannerOptions{
 		ScriptExtensions: cfg.Scanner.ScriptExtensions,
 		MaxFileBytes:     cfg.Scanner.MaxFileBytes,
@@ -374,13 +443,15 @@ func runScan(args scanArgs, stdout, stderr io.Writer) error {
 	})
 
 	for _, r := range repos {
+		owner := r.GetOwner().GetLogin()
+		repoName := r.GetName()
 		sha, shaErr := gh.DefaultBranchSHA(ctx, r)
 		if shaErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s/%s: unable to resolve default branch SHA: %v\n", r.GetOwner().GetLogin(), r.GetName(), shaErr)
+			fmt.Fprintf(os.Stderr, "warning: %s/%s: unable to resolve default branch SHA: %v\n", owner, repoName, shaErr)
 		}
 		snapshot.Repos = append(snapshot.Repos, model.Repo{
-			Owner:         r.GetOwner().GetLogin(),
-			Name:          r.GetName(),
+			Owner:         owner,
+			Name:          repoName,
 			DefaultBranch: r.GetDefaultBranch(),
 			ScannedRef:    sha,
 			Archived:      r.GetArchived(),
@@ -389,7 +460,16 @@ func runScan(args scanArgs, stdout, stderr io.Writer) error {
 
 		workflowFiles, err := gh.ListWorkflowFiles(ctx, r)
 		if err != nil {
-			fmt.Fprintf(stderr, "warning: %s/%s: %v\n", r.GetOwner().GetLogin(), r.GetName(), err)
+			if st, ok := httpStatusFromErr(err); ok {
+				switch st {
+				case http.StatusNotFound:
+					continue
+				case http.StatusForbidden:
+					addWarn("workflow_read_forbidden", owner, repoName, "contents.list_workflows", ".github/workflows", st)
+					continue
+				}
+			}
+			fmt.Fprintf(stderr, "warning: %s/%s: %v\n", owner, repoName, err)
 			continue
 		}
 
@@ -399,13 +479,17 @@ func runScan(args scanArgs, stdout, stderr io.Writer) error {
 				if errors.Is(err, githubclient.ErrNotModified) {
 					continue
 				}
-				fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", r.GetOwner().GetLogin(), r.GetName(), wf, err)
+				if st, ok := httpStatusFromErr(err); ok && st == http.StatusForbidden {
+					addWarn("workflow_read_forbidden", owner, repoName, "contents.get_file", wf, st)
+					continue
+				}
+				fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", owner, repoName, wf, err)
 				continue
 			}
 
-			wfFindings, additionalFiles, err := scanner.ScanWorkflowYAML(r.GetOwner().GetLogin(), r.GetName(), wf, wfContent)
+			wfFindings, additionalFiles, err := scanner.ScanWorkflowYAML(owner, repoName, wf, wfContent)
 			if err != nil {
-				fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", r.GetOwner().GetLogin(), r.GetName(), wf, err)
+				fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", owner, repoName, wf, err)
 			}
 			snapshot.Findings = append(snapshot.Findings, wfFindings...)
 
@@ -415,12 +499,20 @@ func runScan(args scanArgs, stdout, stderr io.Writer) error {
 					if errors.Is(err, githubclient.ErrNotModified) {
 						continue
 					}
-					fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", r.GetOwner().GetLogin(), r.GetName(), f.Path, err)
+					if st, ok := httpStatusFromErr(err); ok && st == http.StatusForbidden {
+						kind := "script_read_forbidden"
+						if strings.TrimSpace(f.Kind) != "script" {
+							kind = "local_action_read_forbidden"
+						}
+						addWarn(kind, owner, repoName, "contents.get_file", f.Path, st)
+						continue
+					}
+					fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", owner, repoName, f.Path, err)
 					continue
 				}
 				fileFindings, moreFiles, err := scanner.ScanRepoFile(f, content)
 				if err != nil {
-					fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", r.GetOwner().GetLogin(), r.GetName(), f.Path, err)
+					fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", owner, repoName, f.Path, err)
 				}
 				snapshot.Findings = append(snapshot.Findings, fileFindings...)
 
@@ -430,18 +522,57 @@ func runScan(args scanArgs, stdout, stderr io.Writer) error {
 						if errors.Is(err, githubclient.ErrNotModified) {
 							continue
 						}
-						fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", r.GetOwner().GetLogin(), r.GetName(), mf.Path, err)
+						if st, ok := httpStatusFromErr(err); ok && st == http.StatusForbidden {
+							kind := "script_read_forbidden"
+							if strings.TrimSpace(mf.Kind) != "script" {
+								kind = "local_action_read_forbidden"
+							}
+							addWarn(kind, owner, repoName, "contents.get_file", mf.Path, st)
+							continue
+						}
+						fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", owner, repoName, mf.Path, err)
 						continue
 					}
 					ff2, _, err := scanner.ScanRepoFile(mf, c2)
 					if err != nil {
-						fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", r.GetOwner().GetLogin(), r.GetName(), mf.Path, err)
+						fmt.Fprintf(stderr, "warning: %s/%s %s: %v\n", owner, repoName, mf.Path, err)
 					}
 					snapshot.Findings = append(snapshot.Findings, ff2...)
 				}
 			}
 
 			gh.StoreETag(meta)
+		}
+	}
+
+	if len(warnByRepo) > 0 {
+		byMessage := map[string]map[string]struct{}{}
+		order := make([]string, 0)
+		for _, byKind := range warnByRepo {
+			for _, w := range byKind {
+				snapshot.ScanWarnings = append(snapshot.ScanWarnings, w)
+				msg := strings.TrimSpace(w.Message)
+				repo := repoKey(w.RepoOwner, w.RepoName)
+				set := byMessage[msg]
+				if set == nil {
+					set = map[string]struct{}{}
+					byMessage[msg] = set
+					order = append(order, msg)
+				}
+				set[repo] = struct{}{}
+			}
+		}
+		for _, msg := range order {
+			set := byMessage[msg]
+			if len(set) == 0 {
+				continue
+			}
+			repos := make([]string, 0, len(set))
+			for r := range set {
+				repos = append(repos, r)
+			}
+			sort.Strings(repos)
+			fmt.Fprintf(stderr, "warning: %s for %s\n", msg, strings.Join(repos, ", "))
 		}
 	}
 
